@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zero-Day Risk Analyzer</title>
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <!-- Styles -->
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <div style="display: flex; justify-content: space-between; align-items: center; max-width: 1200px; margin: 0 auto;">
+            <h1>Zero-Day Risk Analyzer</h1>
+            <div style="font-size: 0.9rem; color: var(--text-secondary)">AI-Powered CVE Assessment</div>
+        </div>
+    </header>
+
+    <main>
+        <div class="container">
+            <!-- Analyzer Section -->
+            <div class="card">
+                <div class="section-title">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                    </svg>
+                    Analyze Vulnerability
+                </div>
+                <p style="color: var(--text-secondary); margin-bottom: 1rem; font-size: 0.9rem;">
+                    Enter a vulnerability description below to assess its risk level and detect anomalous patterns that might indicate a zero-day attack.
+                </p>
+                <textarea id="descInput" placeholder="Paste CVE description here (e.g., 'Buffer overflow in processing module allowing arbitrary code execution...')"></textarea>
+                
+                <button id="analyzeBtn">
+                    Analyze Risk
+                    <div class="loader"></div>
+                </button>
+
+                <div id="resultsContainer">
+                    <div id="resultGrid" class="result-grid">
+                        <div class="stat-card">
+                            <div class="stat-label">Model Classification</div>
+                            <div id="critTag" class="tag safe">WAITING...</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Confidence Score</div>
+                            <div id="confValue" class="stat-value">--</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Pattern Analysis</div>
+                            <div id="anomTag" class="tag normal">WAITING...</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Anomaly Score</div>
+                            <div id="scoreValue" class="stat-value">--</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Latest CVEs Section -->
+            <div class="card">
+                <div class="section-title">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <line x1="2" y1="12" x2="22" y2="12"></line>
+                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                    </svg>
+                    Live Intelligence Feed (NVD)
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                    <p style="color: var(--text-secondary); font-size: 0.9rem;">
+                        Real-time analysis of the last 10 CVEs published within 7 days.
+                    </p>
+                    <button id="fetchLatestBtn" style="font-size: 0.85rem; padding: 0.5rem 1rem;">
+                        Fetch Latest
+                        <div class="loader"></div>
+                    </button>
+                </div>
+                
+                <div id="latestList" class="cve-list">
+                    <!-- Items will appear here -->
+                    <div style="text-align: center; color: var(--text-secondary); padding: 2rem;">
+                        Click "Fetch Latest" to load data.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
