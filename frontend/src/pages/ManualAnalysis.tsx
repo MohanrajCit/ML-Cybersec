@@ -60,7 +60,7 @@ const ManualAnalysis = () => {
   return (
     <div className="relative min-h-screen">
       <GridBackground />
-      
+
       <div className="relative pt-24 pb-20 px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-3xl">
           {/* Header */}
@@ -96,14 +96,11 @@ const ManualAnalysis = () => {
                 setDescription(e.target.value);
                 if (error) setError(null);
               }}
-              placeholder="Enter the CVE or vulnerability description here...
-
-Example: A buffer overflow vulnerability in the HTTP parser of Application X allows remote attackers to execute arbitrary code via a crafted request..."
-              className={`min-h-[180px] resize-none font-mono text-sm ${
-                error ? "border-destructive focus-visible:ring-destructive" : ""
-              }`}
+              placeholder="Enter the CVE or vulnerability description here..."
+              className={`min-h-[180px] resize-none font-mono text-sm ${error ? "border-destructive focus-visible:ring-destructive" : ""
+                }`}
             />
-            
+
             {error && (
               <motion.div
                 initial={{ opacity: 0, y: -10 }}

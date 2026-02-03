@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { 
-  Shield, 
-  AlertTriangle, 
-  Activity, 
-  TrendingUp, 
+import {
+  Shield,
+  AlertTriangle,
+  Activity,
+  TrendingUp,
   Info,
   RefreshCw
 } from "lucide-react";
@@ -94,7 +94,7 @@ const RiskIntelligence = () => {
 
   // Generate insights
   const insights: { icon: string; text: string; type: "warning" | "alert" | "info" }[] = [];
-  
+
   if (highRiskCount > 0) {
     insights.push({
       icon: "⚠️",
@@ -102,7 +102,7 @@ const RiskIntelligence = () => {
       type: "warning",
     });
   }
-  
+
   if (anomalousCount > 0) {
     insights.push({
       icon: "🚨",
@@ -110,7 +110,7 @@ const RiskIntelligence = () => {
       type: "alert",
     });
   }
-  
+
   if (highRiskCount === 0 && anomalousCount === 0 && totalCVEs > 0) {
     insights.push({
       icon: "✅",
@@ -130,7 +130,7 @@ const RiskIntelligence = () => {
   return (
     <div className="relative min-h-screen">
       <GridBackground />
-      
+
       <div className="relative pt-24 pb-20 px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-6xl">
           {/* Header */}
@@ -262,13 +262,12 @@ const RiskIntelligence = () => {
                         initial={{ opacity: 0, x: -20 }}
                         animate={{ opacity: 1, x: 0 }}
                         transition={{ delay: 0.3 + index * 0.1 }}
-                        className={`flex items-start gap-3 rounded-lg border p-4 ${
-                          insight.type === "warning"
+                        className={`flex items-start gap-3 rounded-lg border p-4 ${insight.type === "warning"
                             ? "border-warning/30 bg-warning/5"
                             : insight.type === "alert"
-                            ? "border-destructive/30 bg-destructive/5"
-                            : "border-border bg-card"
-                        }`}
+                              ? "border-destructive/30 bg-destructive/5"
+                              : "border-border bg-card"
+                          }`}
                       >
                         <span className="text-xl">{insight.icon}</span>
                         <p className="text-sm text-foreground">{insight.text}</p>
@@ -278,24 +277,7 @@ const RiskIntelligence = () => {
                 </motion.section>
               )}
 
-              {/* Decision Support Disclaimer */}
-              <motion.section
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.4 }}
-                className="rounded-xl border border-primary/20 bg-primary/5 p-5"
-              >
-                <div className="flex items-start gap-3">
-                  <Info className="mt-0.5 h-5 w-5 flex-shrink-0 text-primary" />
-                  <div>
-                    <h3 className="text-sm font-medium text-foreground">Decision Support Disclaimer</h3>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      This system provides early-stage ML-based risk estimation to support security decision-making.
-                      It does not replace CVSS scoring or expert analysis.
-                    </p>
-                  </div>
-                </div>
-              </motion.section>
+
             </>
           )}
         </div>

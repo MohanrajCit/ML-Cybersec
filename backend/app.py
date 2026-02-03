@@ -29,6 +29,9 @@ from cve_realtime_processor import (
     process_new_cves
 )
 
+# Import daily CVE service
+from nvd_daily_service import fetch_cves_daily_with_fallback
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -162,6 +165,7 @@ async def root():
         "endpoints": {
             "predict": "POST /predict",
             "latest_cves": "GET /predict/latest-cves",
+            "daily_cves": "GET /api/nvd/daily",
             "meta": "GET /meta",
             "health": "GET /health",
             "docs": "GET /docs"
@@ -321,6 +325,116 @@ async def predict_latest_cves(
         raise HTTPException(
             status_code=502,
             detail={"error": f"Failed to fetch CVEs from NVD: {str(e)}", "trace_id": trace_id}
+        )
+
+
+# --- Daily CVE Prediction Endpoint ---
+
+class DailyCVEItem(BaseModel):
+    """Model for individual CVE in daily response"""
+    cve_id: str = Field(..., description="CVE identifier")
+    published: Optional[str] = Field(None, description="Published timestamp (ISO-8601 UTC)")
+    lastModified: Optional[str] = Field(None, description="Last modified timestamp (ISO-8601 UTC)")
+    risk: str = Field(..., description="Risk level: HIGH, MEDIUM, or LOW")
+    confidence: float = Field(..., description="Confidence score (0.0 to 1.0)")
+    anomalous: bool = Field(..., description="Whether the pattern is anomalous")
+
+
+class DailyCVEWindow(BaseModel):
+    """Date window for daily CVE fetch"""
+    pubStartDate: str = Field(..., description="Start of window (ISO-8601 UTC with Z suffix)")
+    pubEndDate: str = Field(..., description="End of window (ISO-8601 UTC with Z suffix)")
+
+
+class DailyCVEResponse(BaseModel):
+    """Response model for /api/nvd/daily endpoint"""
+    mode: str = Field(..., description="'daily' if today's CVEs found, 'fallback' if using last N days")
+    window: DailyCVEWindow = Field(..., description="Date window used for fetching")
+    count: int = Field(..., description="Number of CVEs returned")
+    items: List[DailyCVEItem] = Field(..., description="List of CVE predictions")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "mode": "daily",
+                "window": {
+                    "pubStartDate": "2026-01-02T00:00:00.000Z",
+                    "pubEndDate": "2026-01-02T17:45:30.123Z"
+                },
+                "count": 2,
+                "items": [
+                    {
+                        "cve_id": "CVE-2026-12345",
+                        "published": "2026-01-02T10:30:00.000Z",
+                        "lastModified": "2026-01-02T12:00:00.000Z",
+                        "risk": "HIGH",
+                        "confidence": 0.87,
+                        "anomalous": False
+                    }
+                ]
+            }
+        }
+
+
+@app.get("/api/nvd/daily", response_model=DailyCVEResponse)
+async def get_daily_cves(
+    fallback_days: int = Query(
+        default=3,
+        ge=2,
+        le=3,
+        description="Fallback window in days if no CVEs today (allowed: 2 or 3)"
+    )
+):
+    """
+    Fetch CVEs published today (UTC) with automatic fallback.
+    
+    **Process:**
+    1. Fetches CVEs published today (UTC 00:00:00 to now)
+    2. If none found, falls back to last N days (configurable)
+    3. Runs ML risk prediction and anomaly detection for each CVE
+    4. Returns structured JSON with mode indicator
+    
+    **Query Parameters:**
+    - `fallback_days`: Days for fallback window (default: 3, allowed: 2 or 3)
+    
+    **Response:**
+    - `mode`: "daily" if CVEs found today, "fallback" if using last N days
+    - `window`: Date range used for fetching (pubStartDate/pubEndDate in UTC)
+    - `count`: Number of CVEs returned
+    - `items`: List of CVE predictions with risk/confidence/anomaly
+    
+    **Note:**
+    - Uses NVD API 2.0 with pagination
+    - Requires NVD_API_KEY environment variable for higher rate limits
+    - Implements exponential backoff for rate limiting (429) and server errors
+    """
+    try:
+        result = fetch_cves_daily_with_fallback(fallback_days=fallback_days)
+        return DailyCVEResponse(
+            mode=result["mode"],
+            window=DailyCVEWindow(
+                pubStartDate=result["window"]["pubStartDate"],
+                pubEndDate=result["window"]["pubEndDate"]
+            ),
+            count=result["count"],
+            items=[
+                DailyCVEItem(
+                    cve_id=item["cve_id"],
+                    published=item.get("published"),
+                    lastModified=item.get("lastModified"),
+                    risk=item["risk"],
+                    confidence=item["confidence"],
+                    anomalous=item["anomalous"]
+                )
+                for item in result["items"]
+            ]
+        )
+    except Exception as e:
+        trace_id = str(uuid.uuid4())[:8]
+        logger.error(f"[{trace_id}] Error in daily CVE fetch: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail={"error": f"Failed to fetch daily CVEs: {str(e)}", "trace_id": trace_id}
         )
 
 

@@ -27,8 +27,9 @@ X = tfidf.transform(df[TEXT_COL])
 
 # 4. Train Isolation Forest
 print("Training Isolation Forest...")
-# contamination='auto' allows the model to determine the threshold
-clf_iso = IsolationForest(n_estimators=100, contamination='auto', random_state=42, n_jobs=-1)
+# contamination=0.05 means ~5% of data is expected to be anomalous
+# This provides a good balance between sensitivity and false positives
+clf_iso = IsolationForest(n_estimators=100, contamination=0.05, random_state=42, n_jobs=-1)
 clf_iso.fit(X)
 
 # 5. Save model

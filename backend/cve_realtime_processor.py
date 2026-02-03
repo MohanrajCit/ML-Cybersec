@@ -17,6 +17,8 @@ import json
 import logging
 import joblib
 import requests
+import random
+import pandas as pd
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
@@ -42,6 +44,7 @@ NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 MODEL_PATH = "rf_model.pkl"
 VECTORIZER_PATH = "tfidf_vectorizer.pkl"
 ANOMALY_MODEL_PATH = "anomaly_model.pkl"
+CSV_DATA_PATH = "cve_data.csv"  # Local fallback data
 
 # --- Global Model Instances ---
 # Loaded once at module import
@@ -58,15 +61,67 @@ except Exception as e:
     clf, vectorizer, anomaly_clf = None, None, None
 
 
+def get_fallback_cves_from_csv(max_results: int = 20) -> List[Dict[str, str]]:
+    """
+    Get sample CVEs from local CSV file as fallback when NVD API is unavailable.
+    
+    This function is used when the NVD API is unreachable (network/DNS issues)
+    to provide the application with data to process instead of returning errors.
+    
+    Args:
+        max_results (int): Maximum number of CVEs to return
+    
+    Returns:
+        list: Sample CVE data with cve_id and description
+    """
+    try:
+        if not os.path.exists(CSV_DATA_PATH):
+            logger.warning(f"Fallback CSV not found: {CSV_DATA_PATH}")
+            return []
+        
+        df = pd.read_csv(CSV_DATA_PATH)
+        
+        # Ensure required columns exist
+        if 'CVE ID' not in df.columns or 'Description' not in df.columns:
+            logger.warning("CSV missing required columns (CVE ID, Description)")
+            return []
+        
+        # Filter out rows with empty descriptions
+        df = df[df['Description'].notna() & (df['Description'].str.len() > 20)]
+        
+        # Sample random CVEs (or take first N if not enough)
+        sample_size = min(max_results, len(df))
+        if sample_size == 0:
+            return []
+        
+        sampled_df = df.sample(n=sample_size, random_state=None)
+        
+        fallback_cves = [
+            {
+                "cve_id": str(row["CVE ID"]),
+                "description": str(row["Description"])
+            }
+            for _, row in sampled_df.iterrows()
+        ]
+        
+        logger.info(f"✓ Using {len(fallback_cves)} CVEs from local fallback data")
+        return fallback_cves
+        
+    except Exception as e:
+        logger.error(f"✗ Error reading fallback CSV: {e}")
+        return []
+
 def predict_risk(description: str) -> Dict[str, any]:
     """
     Predict CVE risk from description text with three-level classification.
     
     Uses pre-trained binary TF-IDF vectorizer and Random Forest classifier.
+    Applies keyword-based severity boosting to improve MEDIUM classification accuracy.
+    
     Maps prediction probabilities to three risk levels:
     - HIGH:   probability >= 0.70 (high certainty of critical risk)
-    - MEDIUM: probability 0.40-0.69 (moderate/uncertain risk level)
-    - LOW:    probability < 0.40 (low risk/benign)
+    - MEDIUM: probability 0.35-0.69 (moderate/uncertain risk level)
+    - LOW:    probability < 0.35 (low risk/benign)
     
     DOES NOT retrain or modify models.
     
@@ -77,7 +132,8 @@ def predict_risk(description: str) -> Dict[str, any]:
         dict: {
             "risk": "HIGH" | "MEDIUM" | "LOW",
             "confidence": float (0.0 to 1.0),
-            "prediction_class": int (1=HIGH, 0=LOW from original binary model)
+            "prediction_class": int (1=HIGH, 0=LOW from original binary model),
+            "boosted": bool (True if keyword boost was applied)
         }
     
     Raises:
@@ -97,23 +153,167 @@ def predict_risk(description: str) -> Dict[str, any]:
     # For binary classifier: probabilities[0] = P(LOW), probabilities[1] = P(HIGH)
     high_risk_probability = float(probabilities[1])
     
+    # --- Keyword-Based Severity Boosting ---
+    # Boost probability for MEDIUM-severity patterns that the binary model underestimates
+    # These keywords indicate vulnerabilities typically rated CVSS 4.0-6.9
+    desc_lower = description.lower()
+    
+    # High-impact security keywords that warrant at least MEDIUM classification
+    medium_severity_keywords = [
+        # Access control issues (CVSS 4.0-6.9 typically)
+        'insecure direct object reference', 'idor',
+        'missing capability check', 'capability check',
+        'insufficient permission', 'permission check',
+        'authorization bypass', 'authentication bypass',
+        'access control', 'broken access control',
+        
+        # Cross-site scripting (CVSS 4.0-6.9 for most XSS)
+        'cross-site scripting', 'xss', 'stored xss', 'reflected xss',
+        'script injection', 'inject scripts', 'html injection',
+        'insufficient input sanitization', 'input sanitization',
+        
+        # Cross-site request forgery
+        'cross-site request forgery', 'csrf', 'xsrf',
+        
+        # Data exposure issues
+        'unauthorized access', 'unauthorized modification',
+        'disclosure of sensitive', 'information disclosure',
+        'api key', 'sensitive data', 'credential',
+        
+        # Privilege-related issues
+        'privilege escalation', 'elevated privilege',
+        'subscriber level', 'contributor level', 'author level',
+        'authenticated attacker',
+        
+        # Path traversal / file issues
+        'path traversal', 'directory traversal', 'local file inclusion',
+        'file upload', 'arbitrary file', 'file read', 'file write',
+        
+        # Common WordPress/plugin vulnerability patterns
+        'modify acf fields', 'modify posts', 'modify user',
+        'edit_posts', 'edit_post', 'manage_options',
+        'rest api', 'ajax action',
+    ]
+    
+    # Higher severity keywords that warrant HIGH classification
+    # These should ONLY boost to HIGH when combined with 'unauthenticated' context
+    high_severity_keywords = [
+        'remote code execution', 'rce', 'arbitrary code execution',
+        'root access', 'full control', 'complete takeover',
+        'zero-day', '0-day', 'critical vulnerability',
+    ]
+    
+    # Keywords that are HIGH only when UNAUTHENTICATED
+    conditional_high_keywords = [
+        'sql injection', 'command injection', 'code injection',
+        'arbitrary code', 'execute code', 'execute commands',
+    ]
+    
+    # Check if vulnerability is unauthenticated (much more severe)
+    is_unauthenticated = any(term in desc_lower for term in [
+        'unauthenticated', 'without authentication', 'no authentication',
+        'anonymous', 'pre-auth', 'before authentication'
+    ])
+    
+    # Check if explicitly authenticated (less severe)
+    is_authenticated = any(term in desc_lower for term in [
+        'authenticated attacker', 'authenticated user',
+        'subscriber level', 'contributor level', 'author level', 'editor level',
+        'admin user', 'logged-in user', 'with subscriber', 'with contributor',
+        'requires authentication', 'must be authenticated'
+    ])
+    
+    boost_applied = False
+    boost_amount = 0.0
+    
+    # HIGH severity: unauthenticated + dangerous keywords = definitely HIGH
+    if is_unauthenticated and not is_authenticated:
+        # Check for high-severity keywords
+        for keyword in high_severity_keywords:
+            if keyword in desc_lower:
+                boost_amount = 0.40  # Strong boost to HIGH
+                boost_applied = True
+                break
+        
+        # Check for conditional high keywords (only HIGH when unauthenticated)
+        if not boost_applied:
+            for keyword in conditional_high_keywords:
+                if keyword in desc_lower:
+                    boost_amount = 0.35  # Boost to HIGH
+                    boost_applied = True
+                    break
+    
+    # Check for unconditional HIGH keywords (always HIGH regardless of auth)
+    if not boost_applied:
+        for keyword in ['remote code execution', 'rce', 'root access', 'full control', 'zero-day', '0-day']:
+            if keyword in desc_lower and is_unauthenticated:
+                boost_amount = 0.40
+                boost_applied = True
+                break
+    
+    # MEDIUM severity: authenticated vulnerabilities with dangerous patterns
+    if not boost_applied:
+        keyword_matches = sum(1 for kw in medium_severity_keywords if kw in desc_lower)
+        
+        # Also count conditional high keywords as MEDIUM evidence when authenticated
+        if is_authenticated:
+            for kw in conditional_high_keywords:
+                if kw in desc_lower:
+                    keyword_matches += 1
+        
+        if keyword_matches >= 4:
+            boost_amount = 0.25  # Strong evidence of MEDIUM
+            boost_applied = True
+        elif keyword_matches >= 2:
+            boost_amount = 0.18  # Moderate evidence of MEDIUM
+            boost_applied = True
+        elif keyword_matches >= 1:
+            boost_amount = 0.10  # Some evidence of MEDIUM
+            boost_applied = True
+    
+    # --- LOW Severity Detection ---
+    # Keywords that indicate minimal impact (CVSS 0.1-3.9)
+    # Apply negative boost to keep these as LOW
+    low_severity_keywords = [
+        'minor', 'non-sensitive', 'debug information', 'debug mode',
+        'version number', 'version disclosure', 'http headers',
+        'verbose error', 'error message', 'warning message',
+        'edge case', 'specific conditions', 'certain conditions',
+        'configuration issue', 'config issue', 'typo',
+        'low impact', 'minimal impact', 'limited impact',
+        'informational', 'cosmetic', 'display issue',
+    ]
+    
+    # Check for LOW severity indicators (only if no MEDIUM/HIGH keywords found)
+    if not boost_applied:
+        low_matches = sum(1 for kw in low_severity_keywords if kw in desc_lower)
+        if low_matches >= 2:
+            boost_amount = -0.15  # Strong evidence of LOW - reduce probability
+        elif low_matches >= 1:
+            boost_amount = -0.08  # Some evidence of LOW
+    
+    # Apply boost (capped at 0.85 to avoid overconfidence, min 0 to avoid negative)
+    boosted_probability = max(0, min(high_risk_probability + boost_amount, 0.85))
+    
     # --- Three-Level Risk Mapping ---
     # MEDIUM risk represents cases where the model is uncertain or detects moderate threat.
     # This provides a buffer zone between clearly HIGH and clearly LOW risk CVEs.
-    if high_risk_probability >= 0.70:
+    if boosted_probability >= 0.70:
         risk_level = "HIGH"
-        confidence = high_risk_probability  # Confidence in HIGH classification
-    elif high_risk_probability >= 0.40:
+        confidence = boosted_probability
+    elif boosted_probability >= 0.35:
         risk_level = "MEDIUM"
-        confidence = high_risk_probability  # Reflects moderate risk probability
+        confidence = boosted_probability
     else:
         risk_level = "LOW"
-        confidence = 1.0 - high_risk_probability  # Confidence in LOW classification
+        confidence = 1.0 - boosted_probability
     
     return {
         "risk": risk_level,
         "confidence": confidence,
-        "prediction_class": int(prediction_class)
+        "prediction_class": int(prediction_class),
+        "boosted": boost_applied
+
     }
 
 
@@ -253,6 +453,15 @@ def fetch_cves_from_nvd(
     
     except requests.RequestException as e:
         logger.error(f"✗ Error fetching from NVD API: {e}")
+        logger.info("Attempting to use local fallback data...")
+        
+        # Use fallback data from local CSV instead of raising error
+        fallback_cves = get_fallback_cves_from_csv(max_results)
+        if fallback_cves:
+            logger.warning("⚠ Using cached/sample CVEs due to API unavailability")
+            return fallback_cves
+        
+        # Only raise if fallback also fails
         raise
 
 

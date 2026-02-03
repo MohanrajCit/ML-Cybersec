@@ -15,11 +15,11 @@ Original Binary Model → Three-Level Risk Output
         └───────────────────────────────────────────┘
          ↓
          │
-         ├─── 0.00 to 0.39 ───→ LOW RISK
+         ├─── 0.00 to 0.34 ───→ LOW RISK
          │                      Confidence = 1.0 - P(HIGH)
          │                      ✅ Strong evidence of low severity
          │
-         ├─── 0.40 to 0.69 ───→ MEDIUM RISK
+         ├─── 0.35 to 0.69 ───→ MEDIUM RISK
          │                      Confidence = P(HIGH)
          │                      ⚠️  Model uncertainty / moderate threat
          │
@@ -50,10 +50,10 @@ WHY THESE THRESHOLDS?
 ✓ Minimizes false positives for critical alerts
 ✓ Above this: model is quite certain about HIGH risk
 
-40% Threshold (MEDIUM/LOW boundary)
+35% Threshold (MEDIUM/LOW boundary)
 ------------------------------------
-✓ Below 40%: model is reasonably confident it's NOT high risk
-✓ Between 40-69%: model shows significant uncertainty
+✓ Below 35%: model is reasonably confident it's NOT high risk
+✓ Between 35-69%: model shows significant uncertainty
 ✓ Captures the "gray zone" requiring human judgment
 
 MEDIUM Zone Purpose
@@ -115,15 +115,15 @@ ADJUSTING THRESHOLDS (Optional)
 ================================
 
 If you find too many MEDIUM classifications:
-  - Increase the MEDIUM/LOW threshold: 0.40 → 0.45
+  - Increase the MEDIUM/LOW threshold: 0.35 → 0.40
   - Decrease the HIGH/MEDIUM threshold: 0.70 → 0.65
 
 If you want stricter HIGH classifications:
   - Increase the HIGH/MEDIUM threshold: 0.70 → 0.75 or 0.80
 
 Edit these values in cve_realtime_processor.py:
-  Line ~95:  if high_risk_probability >= 0.70:      # Adjust this
-  Line ~98:  elif high_risk_probability >= 0.40:    # Or this
+  Line ~156:  if high_risk_probability >= 0.70:      # Adjust this
+  Line ~160:  elif high_risk_probability >= 0.35:    # Or this
 
 
 IMPLEMENTATION DETAILS
