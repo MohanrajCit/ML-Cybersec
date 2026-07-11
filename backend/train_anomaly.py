@@ -24,6 +24,9 @@ except FileNotFoundError:
 # 3. Transform data
 print("Transforming data...")
 X = tfidf.transform(df[TEXT_COL])
+# Convert to dense array to avoid scipy sparse format compatibility issues
+# between scikit-learn 1.3.2 and newer scipy versions
+X = X.toarray()
 
 # 4. Train Isolation Forest
 print("Training Isolation Forest...")
