@@ -13,6 +13,14 @@ import LoadingSpinner from "@/components/LoadingSpinner";
 import { Button } from "@/components/ui/button";
 import { fetchLatestCVEs, CVEItem } from "@/services/api";
 import { useToast } from "@/hooks/use-toast";
+import {
+  PieChart,
+  Pie,
+  Cell,
+  ResponsiveContainer,
+  Tooltip,
+  Legend,
+} from "recharts";
 
 interface MetricCardProps {
   label: string;
@@ -126,6 +134,18 @@ const RiskIntelligence = () => {
       type: "info",
     });
   }
+
+  // Chart data
+  const riskChartData = [
+    { name: "HIGH", value: highRiskCount, color: "hsl(var(--destructive))" },
+    { name: "MEDIUM", value: mediumRiskCount, color: "hsl(var(--warning))" },
+    { name: "LOW", value: lowRiskCount, color: "hsl(var(--success))" },
+  ].filter((item) => item.value > 0);
+
+  const anomalyChartData = [
+    { name: "Anomalous", value: anomalousCount, color: "hsl(var(--warning))" },
+    { name: "Normal", value: totalCVEs - anomalousCount, color: "hsl(var(--secondary))" },
+  ].filter((item) => item.value > 0);
 
   return (
     <div className="relative min-h-screen">
@@ -244,6 +264,82 @@ const RiskIntelligence = () => {
                 <p className="mt-4 text-sm text-muted-foreground">
                   Anomalous vulnerabilities may indicate unusual patterns or potential zero-day risks.
                 </p>
+              </motion.section>
+
+              {/* Charts Section */}
+              <motion.section
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.15 }}
+                className="mb-10 grid gap-6 md:grid-cols-2"
+              >
+                {/* Risk Distribution Chart */}
+                <div className="rounded-xl border border-border bg-card p-6 flex flex-col">
+                  <h3 className="mb-4 text-base font-semibold text-foreground">Risk Distribution</h3>
+                  <div className="flex-1 min-h-[250px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={riskChartData}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={60}
+                          outerRadius={80}
+                          paddingAngle={5}
+                          dataKey="value"
+                        >
+                          {riskChartData.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.color} />
+                          ))}
+                        </Pie>
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: "hsl(var(--card))",
+                            borderColor: "hsl(var(--border))",
+                            borderRadius: "8px",
+                            color: "hsl(var(--foreground))"
+                          }}
+                          itemStyle={{ color: "hsl(var(--foreground))" }}
+                        />
+                        <Legend verticalAlign="bottom" height={36} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                {/* Anomaly Distribution Chart */}
+                <div className="rounded-xl border border-border bg-card p-6 flex flex-col">
+                  <h3 className="mb-4 text-base font-semibold text-foreground">Anomaly Distribution</h3>
+                  <div className="flex-1 min-h-[250px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={anomalyChartData}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={60}
+                          outerRadius={80}
+                          paddingAngle={5}
+                          dataKey="value"
+                        >
+                          {anomalyChartData.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.color} />
+                          ))}
+                        </Pie>
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: "hsl(var(--card))",
+                            borderColor: "hsl(var(--border))",
+                            borderRadius: "8px",
+                            color: "hsl(var(--foreground))"
+                          }}
+                          itemStyle={{ color: "hsl(var(--foreground))" }}
+                        />
+                        <Legend verticalAlign="bottom" height={36} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
               </motion.section>
 
               {/* Risk Posture Insights */}

@@ -53,14 +53,15 @@ The system combines **supervised classification** (Random Forest) with **unsuper
 
 | Feature | Description |
 |---------|-------------|
-| **Real-time CVE Ingestion** | Automated fetching from NVD REST API v2.0 with pagination, rate limiting, and exponential backoff |
+| **Real-time CVE Ingestion & WebSockets** | Automated fetching from NVD API, pushed directly to clients via WebSockets with real-time UI notifications |
 | **Three-Level Risk Classification** | ML-based prediction classifying CVEs as `HIGH`, `MEDIUM`, or `LOW` risk with confidence scores |
+| **CVSS Score Regression** | Dedicated ML model predicting the precise CVSS v3.x score from just the vulnerability description |
+| **Explainable AI (XAI)** | Transparent predictions displaying exact keyword boosts and top TF-IDF features driving the risk assessment |
 | **Anomaly Detection** | Isolation Forest model identifies vulnerability descriptions that deviate from historical patterns |
-| **Keyword-Boosted Scoring** | Context-aware severity boosting using security-domain keyword analysis (auth context, attack vectors) |
-| **Interactive Dashboard** | React + TypeScript SPA with real-time data visualization, manual analysis, and risk intelligence views |
-| **REST API** | Fully documented FastAPI backend with Swagger UI, request validation, and structured error handling |
+| **Persistent Historical Database** | All predictions are logged to a SQLite database tied to secure user accounts (JWT Authentication) |
+| **Report Generation** | Export comprehensive vulnerability assessments to professional PDF or CSV formats |
+| **Interactive Dashboard** | React + TypeScript SPA with real-time data visualization, comparative analysis, and risk intelligence views |
 | **Graceful Degradation** | Automatic fallback to local CSV dataset when NVD API is unavailable |
-| **Daily CVE Monitor** | Dedicated endpoint for fetching today's published CVEs with configurable fallback windows |
 
 ---
 
@@ -73,37 +74,43 @@ graph TB
     end
 
     subgraph Backend["FastAPI Backend (Python)"]
-        API["REST API Layer<br/>POST /predict<br/>GET /predict/latest-cves<br/>GET /api/nvd/daily"]
-        NVDService["NVD Daily Service<br/>Pagination & Backoff"]
+        API["REST API Layer<br/>POST /predict<br/>POST /api/login<br/>GET /api/history"]
+        WS["WebSocket Server<br/>ws://cve-feed"]
+        NVDService["NVD Background Polling"]
         Processor["CVE Real-time Processor"]
+        DB[(SQLite Database)]
 
         subgraph ML["ML Pipeline"]
-            TFIDF["TF-IDF Vectorizer<br/>(1000 features)"]
-            RF["Random Forest Classifier<br/>(100 estimators)"]
-            IF["Isolation Forest<br/>(5% contamination)"]
-            KW["Keyword Severity Booster"]
+            TFIDF["TF-IDF Vectorizer"]
+            RF["Random Forest (Risk)"]
+            IF["Isolation Forest (Anomaly)"]
+            CVSS["GB Regressor (CVSS)"]
+            XAI["XAI Explainability"]
         end
-
-        Fallback["CSV Fallback<br/>cve_data.csv"]
     end
 
     subgraph Frontend["React Frontend (TypeScript)"]
-        Landing["Landing Page"]
-        Manual["Manual Analysis"]
-        Realtime["Real-time CVE Monitor"]
-        Intel["Risk Intelligence Dashboard"]
+        Auth["JWT Authentication"]
+        Manual["Manual Analysis (XAI)"]
+        Realtime["Real-time WebSocket Feed"]
+        Intel["Risk Intelligence & Compare"]
+        Export["PDF/CSV Reports"]
     end
 
     NVD -->|"Fetch CVEs"| NVDService
     NVDService --> Processor
-    Fallback -.->|"Fallback"| Processor
+    NVDService --> WS
     Processor --> TFIDF
     TFIDF --> RF
     TFIDF --> IF
-    RF --> KW
-    KW -->|"Risk + Confidence"| API
-    IF -->|"Anomaly Flag"| API
+    TFIDF --> CVSS
+    RF --> XAI
+    CVSS --> API
+    XAI --> API
+    IF --> API
+    API <--> DB
     API -->|"JSON REST"| Frontend
+    WS -->|"Real-time Alerts"| Frontend
 ```
 
 ---

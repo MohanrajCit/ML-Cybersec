@@ -39,11 +39,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+import numpy as np
+
 # --- Constants ---
 NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 MODEL_PATH = "rf_model.pkl"
 VECTORIZER_PATH = "tfidf_vectorizer.pkl"
 ANOMALY_MODEL_PATH = "anomaly_model.pkl"
+CVSS_MODEL_PATH = "cvss_regressor.pkl"
 CSV_DATA_PATH = "cve_data.csv"  # Local fallback data
 
 # --- Global Model Instances ---
@@ -52,13 +55,24 @@ try:
     clf = joblib.load(MODEL_PATH)
     vectorizer = joblib.load(VECTORIZER_PATH)
     anomaly_clf = joblib.load(ANOMALY_MODEL_PATH)
-    logger.info("✓ Models loaded successfully")
+    logger.info("✓ Core models loaded successfully")
 except FileNotFoundError as e:
     logger.error(f"✗ Model file not found: {e}")
     clf, vectorizer, anomaly_clf = None, None, None
 except Exception as e:
     logger.error(f"✗ Error loading models: {e}")
     clf, vectorizer, anomaly_clf = None, None, None
+
+# CVSS regression model (optional — system works without it)
+try:
+    cvss_regressor = joblib.load(CVSS_MODEL_PATH)
+    logger.info("✓ CVSS regression model loaded")
+except FileNotFoundError:
+    logger.warning("⚠ CVSS regressor not found — run train_cvss_model.py to enable score prediction")
+    cvss_regressor = None
+except Exception as e:
+    logger.warning(f"⚠ Error loading CVSS regressor: {e}")
+    cvss_regressor = None
 
 
 def get_fallback_cves_from_csv(max_results: int = 20) -> List[Dict[str, str]]:
@@ -296,17 +310,35 @@ def predict_risk(description: str) -> Dict[str, any]:
     boosted_probability = max(0, min(high_risk_probability + boost_amount, 0.85))
     
     # --- Three-Level Risk Mapping ---
-    # MEDIUM risk represents cases where the model is uncertain or detects moderate threat.
-    # This provides a buffer zone between clearly HIGH and clearly LOW risk CVEs.
-    if boosted_probability >= 0.70:
-        risk_level = "HIGH"
-        confidence = boosted_probability
-    elif boosted_probability >= 0.35:
-        risk_level = "MEDIUM"
-        confidence = boosted_probability
+    # Industry standard CVSS v3.0 Ratings:
+    # LOW: 0.0 - 3.9
+    # MEDIUM: 4.0 - 6.9
+    # HIGH: 7.0 - 10.0 (combines High and Critical)
+    
+    cvss_score = predict_cvss_score(description)
+    
+    if cvss_score is not None:
+        if cvss_score >= 7.0:
+            risk_level = "HIGH"
+            confidence = boosted_probability
+        elif cvss_score >= 4.0:
+            risk_level = "MEDIUM"
+            confidence = boosted_probability
+        else:
+            risk_level = "LOW"
+            # Invert confidence for LOW risk as before
+            confidence = 1.0 - boosted_probability
     else:
-        risk_level = "LOW"
-        confidence = 1.0 - boosted_probability
+        # Fallback to model probability if CVSS regressor is not loaded
+        if boosted_probability >= 0.70:
+            risk_level = "HIGH"
+            confidence = boosted_probability
+        elif boosted_probability >= 0.35:
+            risk_level = "MEDIUM"
+            confidence = boosted_probability
+        else:
+            risk_level = "LOW"
+            confidence = 1.0 - boosted_probability
     
     return {
         "risk": risk_level,
@@ -363,6 +395,124 @@ def detect_anomaly(description: str) -> Dict[str, any]:
         "anomalous": is_anomalous,  # Now a native Python bool (JSON-safe)
         "anomaly_score": anomaly_score,  # Already converted to float above
         "threshold_info": threshold_info
+    }
+
+def predict_cvss_score(description: str) -> Optional[float]:
+    """
+    Predict the actual CVSS score (0.0–10.0) for a CVE description.
+
+    Uses a Gradient Boosting Regressor trained on historical CVSS data.
+    Returns None if the CVSS model is not loaded.
+
+    Args:
+        description: CVE vulnerability description text
+
+    Returns:
+        Predicted CVSS score clamped to [0.0, 10.0], or None
+    """
+    if cvss_regressor is None or vectorizer is None:
+        return None
+
+    X = vectorizer.transform([description])
+    score = float(cvss_regressor.predict(X)[0])
+    return round(max(0.0, min(10.0, score)), 1)
+
+
+def explain_prediction(description: str) -> Dict:
+    """
+    Generate an explainability report for a prediction.
+
+    Extracts:
+      - Top TF-IDF features that contributed to the prediction
+      - Keyword severity boosts that were applied
+      - Authentication context detected
+      - Model probability breakdown
+
+    Args:
+        description: CVE vulnerability description text
+
+    Returns:
+        dict with explainability data
+    """
+    if not clf or not vectorizer:
+        raise ValueError("Models not loaded.")
+
+    # --- TF-IDF Feature Analysis ---
+    X = vectorizer.transform([description])
+    feature_names = vectorizer.get_feature_names_out()
+    rf_importances = clf.feature_importances_
+
+    nonzero_indices = X[0].nonzero()[1]
+    term_contributions = []
+    for idx in nonzero_indices:
+        tfidf_w = float(X[0, idx])
+        rf_imp = float(rf_importances[idx])
+        contribution = tfidf_w * rf_imp
+        term_contributions.append({
+            "term": str(feature_names[idx]),
+            "tfidf_weight": round(tfidf_w, 4),
+            "model_importance": round(rf_imp, 6),
+            "contribution": round(contribution, 6),
+        })
+
+    term_contributions.sort(key=lambda x: x["contribution"], reverse=True)
+    top_features = term_contributions[:10]
+
+    # --- Model Probability ---
+    probabilities = clf.predict_proba(X)[0]
+    base_probability = float(probabilities[1])
+
+    # --- Keyword Boost Analysis ---
+    desc_lower = description.lower()
+
+    matched_keywords = []
+    critical_kws = [
+        'remote code execution', 'rce', 'arbitrary code execution',
+        'root access', 'full control', 'complete takeover', 'zero-day', '0-day',
+    ]
+    dangerous_kws = [
+        'sql injection', 'command injection', 'code injection',
+        'arbitrary code', 'execute code', 'execute commands',
+    ]
+    medium_kws = [
+        'cross-site scripting', 'xss', 'csrf', 'cross-site request forgery',
+        'path traversal', 'directory traversal', 'privilege escalation',
+        'information disclosure', 'unauthorized access', 'file upload',
+        'authentication bypass', 'authorization bypass',
+    ]
+
+    for kw in critical_kws:
+        if kw in desc_lower:
+            matched_keywords.append({"keyword": kw, "category": "critical", "boost": "+0.40"})
+    for kw in dangerous_kws:
+        if kw in desc_lower:
+            matched_keywords.append({"keyword": kw, "category": "dangerous", "boost": "+0.35"})
+    for kw in medium_kws:
+        if kw in desc_lower:
+            matched_keywords.append({"keyword": kw, "category": "medium", "boost": "+0.10 to +0.25"})
+
+    # --- Auth Context ---
+    is_unauth = any(t in desc_lower for t in [
+        'unauthenticated', 'without authentication', 'no authentication',
+        'anonymous', 'pre-auth',
+    ])
+    is_auth = any(t in desc_lower for t in [
+        'authenticated attacker', 'authenticated user',
+        'subscriber level', 'contributor level', 'requires authentication',
+    ])
+    auth_context = "unauthenticated" if is_unauth else ("authenticated" if is_auth else "not specified")
+
+    # --- Run the actual prediction for final values ---
+    risk_result = predict_risk(description)
+
+    return {
+        "top_features": top_features,
+        "keyword_matches": matched_keywords,
+        "auth_context": auth_context,
+        "base_probability": round(base_probability, 4),
+        "boost_applied": risk_result["boosted"],
+        "final_risk": risk_result["risk"],
+        "final_confidence": round(risk_result["confidence"], 4),
     }
 
 

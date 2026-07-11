@@ -1,8 +1,9 @@
 pandas
 scikit-learn
 joblib
-flask
 requests
 fastapi
 uvicorn[standard]
 pydantic
+sqlalchemy
+fpdf2

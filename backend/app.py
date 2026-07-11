@@ -6,6 +6,9 @@ REST API that exposes ML-based CVE risk prediction via HTTP endpoints.
 Key Features:
 - POST /predict - Predict risk for a single CVE description
 - GET /predict/latest-cves - Fetch and analyze recent CVEs from NVD
+- GET /api/history - Historical prediction records
+- GET /api/export/csv|pdf - Report export
+- POST /api/explain - Prediction explainability
 
 Design Principles:
 - Models loaded at startup (not per request)
@@ -14,23 +17,49 @@ Design Principles:
 - CORS enabled for frontend integration
 """
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, EmailStr
+from typing import List, Optional, Dict
+from datetime import datetime, timezone, timedelta
 import logging
 import os
+import io
 import uuid
+import asyncio
+import json
 
-# Import existing prediction functions (DO NOT MODIFY THESE)
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+
+# Import prediction functions
 from cve_realtime_processor import (
     predict_risk,
     detect_anomaly,
-    process_new_cves
+    process_new_cves,
+    predict_cvss_score,
+    explain_prediction,
 )
 
 # Import daily CVE service
 from nvd_daily_service import fetch_cves_daily_with_fallback
+
+# Import database
+from database import get_db, init_db
+from db_models import CVEPredictionRecord
+
+from report_generator import generate_csv, generate_pdf
+
+# Import auth
+from auth import (
+    get_password_hash, verify_password, create_access_token, get_current_user,
+    ACCESS_TOKEN_EXPIRE_MINUTES, oauth2_scheme
+)
+from db_models import User
+from fastapi.security import OAuth2PasswordRequestForm
+from jose import JWTError, jwt
+from auth import SECRET_KEY, ALGORITHM
 
 # Configure logging
 logging.basicConfig(
@@ -91,16 +120,20 @@ class PredictResponse(BaseModel):
     """Response model for /predict endpoint"""
     risk: str = Field(..., description="Risk level: HIGH, MEDIUM, or LOW")
     confidence: float = Field(..., description="Confidence score (0.0 to 1.0)")
+    cvss_predicted: Optional[float] = Field(None, description="Predicted CVSS score (0.0 to 10.0)")
     anomalous: bool = Field(..., description="Whether the pattern is anomalous")
     anomaly_score: float = Field(..., description="Anomaly score (lower = more anomalous)")
+    explanation: Optional[dict] = Field(None, description="Explainability data (top features, keyword matches)")
     
     class Config:
         json_schema_extra = {
             "example": {
                 "risk": "HIGH",
                 "confidence": 0.87,
+                "cvss_predicted": 8.1,
                 "anomalous": False,
-                "anomaly_score": 0.15
+                "anomaly_score": 0.15,
+                "explanation": None
             }
         }
 
@@ -122,16 +155,36 @@ class CVEPrediction(BaseModel):
             }
         }
 
+class UserCreate(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    email: EmailStr
+    role: str
+    is_active: bool
+
+
 
 # --- Startup Event: Verify Models are Loaded ---
 
 @app.on_event("startup")
 async def startup_event():
     """
-    Verify that ML models are loaded at startup.
+    Verify that ML models are loaded and initialize the database at startup.
     Models are actually loaded in cve_realtime_processor module at import time.
     """
     logger.info("🚀 Starting CVE Risk Prediction API")
+    
+    # Initialize database
+    init_db()
     
     # Verify required model files exist
     required_files = [
@@ -146,10 +199,97 @@ async def startup_event():
         logger.error(f"❌ Missing model files: {missing_files}")
         raise FileNotFoundError(f"Required model files not found: {missing_files}")
     
-    logger.info("✅ All model files loaded successfully")
+    # Check optional CVSS model
+    if os.path.exists("cvss_regressor.pkl"):
+        logger.info("✅ All models loaded (including CVSS regressor)")
+    else:
+        logger.info("✅ Core models loaded (CVSS regressor not available)")
+    
+    # Start WebSocket polling task
+    asyncio.create_task(nvd_polling_task())
+    
     logger.info("📡 API ready at http://127.0.0.1:8000")
     logger.info("📚 Interactive docs at http://127.0.0.1:8000/docs")
 
+# --- WebSocket & Real-Time Feed ---
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except:
+                pass
+
+manager = ConnectionManager()
+
+seen_cves = set()
+
+async def nvd_polling_task():
+    """Background task to poll NVD and broadcast new high-risk CVEs"""
+    logger.info("Started NVD polling task for WebSockets")
+    
+    # Wait for application to fully start
+    await asyncio.sleep(10)
+    
+    api_key = os.getenv("NVD_API_KEY")
+    
+    while True:
+        try:
+            logger.info("WebSocket Poll: Fetching latest CVEs")
+            loop = asyncio.get_event_loop()
+            
+            # Use run_in_executor to not block the event loop
+            results = await loop.run_in_executor(
+                None, 
+                lambda: process_new_cves(days_back=1, max_results=5, api_key=api_key)
+            )
+            
+            new_cves = []
+            for r in results:
+                if r["cve_id"] not in seen_cves:
+                    seen_cves.add(r["cve_id"])
+                    new_cves.append(r)
+                    
+            if new_cves:
+                logger.info(f"WebSocket Poll: Found {len(new_cves)} new CVEs. Broadcasting...")
+                for cve in new_cves:
+                    message = json.dumps(cve)
+                    await manager.broadcast(message)
+                    
+            # Keep set size manageable
+            if len(seen_cves) > 1000:
+                seen_cves.clear()
+                
+            # Poll every 5 minutes to avoid rate limits
+            await asyncio.sleep(300)
+            
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in polling task: {e}")
+            await asyncio.sleep(60)
+
+@app.websocket("/ws/cve-feed")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Just keep connection alive
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
 # --- API Endpoints ---
 
@@ -168,9 +308,53 @@ async def root():
             "daily_cves": "GET /api/nvd/daily",
             "meta": "GET /meta",
             "health": "GET /health",
-            "docs": "GET /docs"
+            "docs": "GET /docs",
+            "register": "POST /api/register",
+            "login": "POST /api/login"
         }
     }
+
+# --- Auth Endpoints ---
+
+@app.post("/api/register", response_model=UserResponse)
+async def register_user(user: UserCreate, db: Session = Depends(get_db)):
+    db_user = db.query(User).filter(User.username == user.username).first()
+    if db_user:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    
+    db_email = db.query(User).filter(User.email == user.email).first()
+    if db_email:
+        raise HTTPException(status_code=400, detail="Email already registered")
+        
+    hashed_password = get_password_hash(user.password)
+    db_user = User(
+        username=user.username,
+        email=user.email,
+        hashed_password=hashed_password
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+@app.post("/api/login", response_model=Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/api/users/me", response_model=UserResponse)
+async def read_users_me(current_user: User = Depends(get_current_user)):
+    return current_user
 
 
 @app.get("/meta")
@@ -203,42 +387,82 @@ async def get_meta():
 
 
 @app.post("/predict", response_model=PredictResponse)
-async def predict(request: PredictRequest):
+async def predict(
+    request: PredictRequest, 
+    db: Session = Depends(get_db),
+    # Optional auth token so unauthenticated requests still work for demo
+    authorization: Optional[str] = Depends(oauth2_scheme)
+):
     """
     Predict risk level for a single CVE description.
     
     **Process:**
     1. Validates input description (minimum 20 characters)
     2. Runs pre-trained ML model (no retraining)
-    3. Detects anomalous patterns using Isolation Forest
-    4. Returns risk level (HIGH/MEDIUM/LOW) with confidence
+    3. Predicts CVSS score (if regression model available)
+    4. Detects anomalous patterns using Isolation Forest
+    5. Generates explainability report
+    6. Stores prediction in database
     
     **Returns:**
     - `risk`: Risk classification (HIGH, MEDIUM, or LOW)
     - `confidence`: Model confidence (0.0 to 1.0)
+    - `cvss_predicted`: Predicted CVSS score (0.0–10.0) or null
     - `anomalous`: Whether pattern deviates from historical CVEs
     - `anomaly_score`: Anomaly detection score (lower = more anomalous)
-    
-    **Example Request:**
-    ```json
-    {
-      "description": "Remote code execution vulnerability in web framework..."
-    }
-    ```
+    - `explanation`: Explainability data (top features, keyword boosts)
     """
     try:
-        # Call existing prediction function (reuse, don't modify)
+        # Risk prediction
         risk_result = predict_risk(request.description)
         
-        # Call existing anomaly detection function
+        # Anomaly detection
         anomaly_result = detect_anomaly(request.description)
         
-        # Combine results into response format
+        # CVSS score prediction (optional)
+        cvss_score = predict_cvss_score(request.description)
+        
+        # Explainability
+        try:
+            xai_data = explain_prediction(request.description)
+        except Exception:
+            xai_data = None
+        
+        # Get optional user_id
+        user_id = None
+        if authorization:
+            try:
+                payload = jwt.decode(authorization, SECRET_KEY, algorithms=[ALGORITHM])
+                username: str = payload.get("sub")
+                if username:
+                    user = db.query(User).filter(User.username == username).first()
+                    if user:
+                        user_id = user.id
+            except JWTError:
+                pass
+                
+        # Store in database
+        record = CVEPredictionRecord(
+            description=request.description,
+            risk_level=risk_result["risk"],
+            confidence=float(risk_result["confidence"]),
+            cvss_predicted=cvss_score,
+            anomalous=bool(anomaly_result["anomalous"]),
+            anomaly_score=float(anomaly_result["anomaly_score"]),
+            source="manual",
+            explanation=xai_data,
+            user_id=user_id,
+        )
+        db.add(record)
+        db.commit()
+        
         return PredictResponse(
             risk=risk_result["risk"],
             confidence=float(risk_result["confidence"]),
+            cvss_predicted=cvss_score,
             anomalous=bool(anomaly_result["anomalous"]),
-            anomaly_score=float(anomaly_result["anomaly_score"])
+            anomaly_score=float(anomaly_result["anomaly_score"]),
+            explanation=xai_data,
         )
     
     except Exception as e:
@@ -248,6 +472,18 @@ async def predict(request: PredictRequest):
             status_code=500,
             detail={"error": f"Prediction failed: {str(e)}", "trace_id": trace_id}
         )
+
+@app.post("/api/explain")
+async def explain_cve(request: PredictRequest):
+    """
+    Generate an explainability report for a given CVE description.
+    """
+    try:
+        xai_data = explain_prediction(request.description)
+        return xai_data
+    except Exception as e:
+        logger.error(f"Error explaining prediction: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/predict/latest-cves", response_model=List[CVEPrediction])
@@ -437,6 +673,102 @@ async def get_daily_cves(
             detail={"error": f"Failed to fetch daily CVEs: {str(e)}", "trace_id": trace_id}
         )
 
+
+@app.get("/api/history")
+async def get_history(
+    limit: int = Query(default=50, ge=1, le=500, description="Max records to return"),
+    risk_level: Optional[str] = Query(default=None, description="Filter by risk (HIGH, MEDIUM, LOW)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get historical prediction records.
+    """
+    try:
+        query = db.query(CVEPredictionRecord)
+        if risk_level:
+            query = query.filter(CVEPredictionRecord.risk_level == risk_level.upper())
+            
+        records = query.order_by(CVEPredictionRecord.created_at.desc()).limit(limit).all()
+        
+        # Calculate some stats for the response
+        total_high = db.query(CVEPredictionRecord).filter(CVEPredictionRecord.risk_level == "HIGH").count()
+        total_medium = db.query(CVEPredictionRecord).filter(CVEPredictionRecord.risk_level == "MEDIUM").count()
+        total_low = db.query(CVEPredictionRecord).filter(CVEPredictionRecord.risk_level == "LOW").count()
+        
+        stats = {
+            "total_predictions": total_high + total_medium + total_low,
+            "risk_distribution": {
+                "HIGH": total_high,
+                "MEDIUM": total_medium,
+                "LOW": total_low
+            }
+        }
+        
+        return {
+            "stats": stats,
+            "records": [rec.to_dict() for rec in records]
+        }
+    except Exception as e:
+        logger.error(f"Error fetching history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/export/csv")
+async def export_csv(
+    limit: int = Query(default=500, ge=1, le=5000),
+    db: Session = Depends(get_db)
+):
+    """
+    Export prediction history as CSV.
+    """
+    records = db.query(CVEPredictionRecord).order_by(CVEPredictionRecord.created_at.desc()).limit(limit).all()
+    dicts = [rec.to_dict() for rec in records]
+    csv_str = generate_csv(dicts)
+    
+    return StreamingResponse(
+        io.StringIO(csv_str),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=cves_export_{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"}
+    )
+
+@app.get("/api/export/pdf")
+async def export_pdf(
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db)
+):
+    """
+    Export prediction history as PDF report.
+    """
+    records = db.query(CVEPredictionRecord).order_by(CVEPredictionRecord.created_at.desc()).limit(limit).all()
+    dicts = [rec.to_dict() for rec in records]
+    
+    total = len(dicts)
+    if total == 0:
+        raise HTTPException(status_code=404, detail="No records to export")
+        
+    high = sum(1 for r in dicts if r.get("risk_level") == "HIGH")
+    med = sum(1 for r in dicts if r.get("risk_level") == "MEDIUM")
+    low = sum(1 for r in dicts if r.get("risk_level") == "LOW")
+    anom = sum(1 for r in dicts if r.get("anomalous"))
+    conf = sum(r.get("confidence", 0) for r in dicts) / total
+    
+    cvss_scores = [r.get("cvss_predicted") for r in dicts if r.get("cvss_predicted") is not None]
+    avg_cvss = sum(cvss_scores) / len(cvss_scores) if cvss_scores else None
+    
+    stats = {
+        "total_predictions": total,
+        "risk_distribution": {"HIGH": high, "MEDIUM": med, "LOW": low},
+        "anomaly_count": anom,
+        "avg_confidence": conf,
+        "avg_cvss_predicted": avg_cvss,
+    }
+    
+    pdf_bytes = generate_pdf(dicts, stats)
+    
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=cves_report_{datetime.now(timezone.utc).strftime('%Y%m%d')}.pdf"}
+    )
 
 # --- Health Check Endpoint ---
 

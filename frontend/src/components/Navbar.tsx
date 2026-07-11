@@ -1,17 +1,24 @@
 import { Link, useLocation } from "react-router-dom";
-import { Shield, Menu, X } from "lucide-react";
+import { Shield, Menu, X, Bell } from "lucide-react";
 import ThemeToggle from "./ThemeToggle";
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { useAuth } from "@/context/AuthContext";
+import { useWebSocket } from "@/context/WebSocketContext";
+import { Button } from "./ui/button";
 
 const Navbar = () => {
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const { user, isAuthenticated, logout } = useAuth();
+  const { newHighRiskCount, clearCount } = useWebSocket();
 
   const navLinks = [
     { path: "/", label: "Home" },
     { path: "/analyze", label: "Manual Analysis" },
     { path: "/realtime", label: "Real-Time CVEs" },
+    { path: "/history", label: "Prediction History" },
+    { path: "/compare", label: "Compare" },
     { path: "/risk-intelligence", label: "Risk Intelligence" },
   ];
 
@@ -58,8 +65,41 @@ const Navbar = () => {
 
           {/* Right Section */}
           <div className="flex items-center gap-3">
+            <Link to="/realtime" onClick={clearCount} className="relative p-2 text-muted-foreground hover:text-foreground transition-colors">
+              <Bell className="h-5 w-5" />
+              {newHighRiskCount > 0 && (
+                <span className="absolute top-1 right-1 flex h-4 w-4 items-center justify-center rounded-full bg-destructive text-[10px] font-bold text-destructive-foreground">
+                  {newHighRiskCount > 9 ? '9+' : newHighRiskCount}
+                </span>
+              )}
+            </Link>
+            
             <ThemeToggle />
             
+            <div className="hidden md:flex items-center gap-3 ml-2">
+              {isAuthenticated ? (
+                <div className="flex items-center gap-4">
+                  <span className="text-sm text-slate-400">
+                    Welcome, <span className="text-white font-medium">{user?.username}</span>
+                  </span>
+                  <Button variant="outline" size="sm" onClick={logout} className="border-slate-700 hover:bg-slate-800">
+                    Logout
+                  </Button>
+                </div>
+              ) : (
+                <>
+                  <Link to="/login">
+                    <Button variant="ghost" size="sm">Log in</Button>
+                  </Link>
+                  <Link to="/register">
+                    <Button size="sm" className="bg-primary hover:bg-primary/90 text-primary-foreground">
+                      Sign up
+                    </Button>
+                  </Link>
+                </>
+              )}
+            </div>
+
             {/* Mobile Menu Button */}
             <button
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
@@ -99,6 +139,27 @@ const Navbar = () => {
                   {link.label}
                 </Link>
               ))}
+              <div className="pt-4 pb-2 border-t border-border flex flex-col gap-2">
+                {isAuthenticated ? (
+                  <>
+                    <span className="px-4 text-sm text-slate-400">
+                      Logged in as {user?.username}
+                    </span>
+                    <Button variant="outline" className="w-full justify-start" onClick={() => { logout(); setMobileMenuOpen(false); }}>
+                      Logout
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Link to="/login" onClick={() => setMobileMenuOpen(false)}>
+                      <Button variant="ghost" className="w-full justify-start">Log in</Button>
+                    </Link>
+                    <Link to="/register" onClick={() => setMobileMenuOpen(false)}>
+                      <Button className="w-full justify-start bg-primary text-primary-foreground">Sign up</Button>
+                    </Link>
+                  </>
+                )}
+              </div>
             </div>
           </motion.div>
         )}
